@@ -1,5 +1,6 @@
 {
   "data_dir": "./data",
+  "_comment_config": "stmBatch / stmMaxUnconsolidated 可在运行时通过 memory_update_config 动态调整，无需重启。stmBatch 默认 10，stmMaxUnconsolidated 默认 30。",
   "stmBatch": 10,
   "stmWordsThreshold": 500,
   "stmMaxUnconsolidated": 30,

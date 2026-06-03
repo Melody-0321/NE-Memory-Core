@@ -294,6 +294,53 @@ export function registerTools(server, ne, config) {
         }
     );
 
+    server.tool('memory_get_config',
+        'Read runtime configuration: STM extraction batch size and consolidation threshold.\n\n' +
+        '  stmBatch: messages per batch during history backfill (default 10)\n' +
+        '  stmMaxUnconsolidated: unconsolidated STM count threshold to trigger auto-consolidation (default 30)',
+        {},
+        async function(args) {
+            var cfg = {
+                stmBatch: ne.getConfig('stmBatch', 10),
+                stmMaxUnconsolidated: ne.getConfig('stmMaxUnconsolidated', 30)
+            };
+            return { content: [{ type: 'text', text: JSON.stringify(cfg, null, 2) }] };
+        }
+    );
+
+    server.tool('memory_update_config',
+        'Update runtime configuration without restarting the server. Changes take effect immediately.\n\n' +
+        'Allowed keys: stmBatch, stmMaxUnconsolidated\n' +
+        'Example: {"stmMaxUnconsolidated": 15, "stmBatch": 20}',
+        {
+            changes: z.record(z.string(), z.number()).describe('Key-value config updates, e.g. {"stmMaxUnconsolidated": 15}')
+        },
+        async function(args) {
+            var allowed = ['stmBatch', 'stmMaxUnconsolidated'];
+            var applied = {};
+            var rejected = {};
+            var keys = Object.keys(args.changes || {});
+            for (var i = 0; i < keys.length; i++) {
+                var k = keys[i];
+                if (allowed.indexOf(k) !== -1) {
+                    ne.setConfig(k, args.changes[k]);
+                    applied[k] = args.changes[k];
+                } else {
+                    rejected[k] = 'Not allowed. Allowed keys: ' + allowed.join(', ');
+                }
+            }
+            var current = {
+                stmBatch: ne.getConfig('stmBatch', 10),
+                stmMaxUnconsolidated: ne.getConfig('stmMaxUnconsolidated', 30)
+            };
+            return { content: [{ type: 'text', text: JSON.stringify({
+                applied: applied,
+                rejected: Object.keys(rejected).length > 0 ? rejected : null,
+                current: current
+            }, null, 2) }] };
+        }
+    );
+
     server.tool('memory_list_projects',
         'List all Trae workspace projects that have accessible chat history. Use this to discover which projects are available for cross-project search.',
         {},
