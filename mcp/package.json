@@ -1,0 +1,14 @@
+{
+  "name": "ne-memory-mcp",
+  "version": "1.0.0",
+  "description": "NE-Memory MCP Server — cross-platform memory engine via Model Context Protocol",
+  "type": "module",
+  "main": "server.js",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}

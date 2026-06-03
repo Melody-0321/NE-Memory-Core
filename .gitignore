@@ -1,0 +1,11 @@
+node_modules/
+mcp/node_modules/
+data/
+*.json
+!mcp/config.json
+!mcp/mcp_settings.json
+!mcp/package.json
+!mcp/package-lock.json
+.env
+.DS_Store
+Thumbs.db

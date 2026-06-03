@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ne-memory": {
+      "command": "node",
+      "args": ["d:/SillyTavern/ne-memory-core/mcp/server.js"],
+      "env": {}
+    }
+  }
+}
