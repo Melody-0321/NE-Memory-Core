@@ -14,6 +14,8 @@ Persistent memory system for AI agents. Runs as an MCP server — plug into Clau
 git clone <your-repo-url>
 cd ne-memory-core/mcp
 npm install
+cp config.example.json config.json
+# 然后编辑 config.json，填入你的 API Key
 ```
 
 ### Configure
@@ -42,14 +44,22 @@ npm install
     "mcp": [{
       "type": "stdio",
       "command": "node",
-      "args": ["/absolute/path/ne-memory-core/mcp/server.js"],
+      "args": ["/绝对路径/NE-Memory-Core/mcp/server.js"],
       "env": {
-        "NE_MEMORY_DATA_DIR": "/absolute/path/ne-memory-core/data"
+        "NE_MEMORY_DATA_DIR": "/绝对路径/NE-Memory-Core/data"
       }
     }]
   }
 }
 ```
+
+如果要启用原文回溯（`memory_process_history` 和 `memory_access("input_XX")`），在 `env` 中增加：
+
+```json
+"NE_MEMORY_HISTORY_PATH": "/home/用户名/.openclaw/workspace/memory"
+```
+
+指向 OpenClaw 的每日对话日志目录（`memory/YYYY-MM-DD.md`）。
 
 Restart the client. The server exposes 11 tools automatically.
 
@@ -136,13 +146,18 @@ If the agent sees the tool and returns vault stats, it's working.
 
 ## Configuration
 
-Copy `mcp/config.json`:
+Copy `mcp/config.example.json` to `mcp/config.json` and edit:
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `data_dir` | `./data` | Vault file directory |
+| `secondary_api.key` | — | **Required.** API key (e.g. DeepSeek) for STM extraction & LTM consolidation |
+| `secondary_api.url` | `https://api.deepseek.com/v1/chat/completions` | OpenAI-compatible endpoint |
+| `secondary_api.model` | `deepseek-v4-flash` | Model for memory operations |
 | `history.reader` | — | Platform: `trae-sqlite`, `openclaw-md`, `generic-json` |
 | `history.path` | — | Path to history storage |
+
+> **Without `secondary_api.key`**, `memory_extract`, `memory_synthesize`, and `memory_consolidate` will fail with 401 errors. BM25 search and reference lookup still work.
 
 Environment variables override config file:
 
