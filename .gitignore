@@ -2,7 +2,7 @@ node_modules/
 mcp/node_modules/
 data/
 *.json
-!mcp/config.json
+!mcp/config.example.json
 !mcp/mcp_settings.json
 !mcp/package.json
 !mcp/package-lock.json

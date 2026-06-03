@@ -1,16 +1,11 @@
 {
   "data_dir": "./data",
-  "workspace_dir": "C:/Users/Administrator/AppData/Roaming/Trae CN/User/workspaceStorage",
   "stmBatch": 10,
   "stmWordsThreshold": 500,
   "stmMaxUnconsolidated": 30,
   "enableStateSchema": false,
   "retrievalEnabled": true,
   "memoryEnabled": true,
-  "history": {
-    "reader": "trae-sqlite",
-    "path": "C:/Users/Administrator/AppData/Roaming/Trae CN/User/workspaceStorage/6028f08a935ab9240b0797ace99a06dd/state.vscdb"
-  },
   "secondary_api": {
     "url": "https://api.deepseek.com/v1/chat/completions",
     "key": "YOUR_DEEPSEEK_API_KEY",
