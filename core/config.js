@@ -33,6 +33,7 @@ export function getStmBatchSize() {
     return Number(get('stmBatch', 10));
 }
 
+// @deprecated — replaced by cursor engine
 export function getStmWordsThreshold() {
     return Number(get('stmWordsThreshold', 500));
 }
@@ -63,4 +64,54 @@ export function getSecondaryAPIConfig() {
         key: get('secondary_api_key', ''),
         model: get('secondary_api_model', '')
     };
+}
+
+// ─── Cursor engine configuration (v2) ───
+
+export function getExtractionMode() {
+    return get('extractionMode', 'agent');  // 'agent' | 'rp'
+}
+
+export function getInitialStmWindow() {
+    return Number(get('initialStmWindow', 4));
+}
+
+export function getStmExpandStep() {
+    return Number(get('stmExpandStep', 4));
+}
+
+export function getMaxStmWindow() {
+    return Number(get('maxStmWindow', 20));
+}
+
+export function getInitialLtmWindow() {
+    return Number(get('initialLtmWindow', 8));
+}
+
+export function getLtmExpandStep() {
+    return Number(get('ltmExpandStep', 4));
+}
+
+export function getMaxLtmWindow() {
+    return Number(get('maxLtmWindow', 30));
+}
+
+export function getStmMinBatchForCursor() {
+    return Number(get('stmMinBatchForCursor', 3));
+}
+
+export function getLtmMinBatch() {
+    return Number(get('ltmMinBatch', 15));
+}
+
+export function isCursorEngineEnabled() {
+    return get('useCursorEngine', true);
+}
+
+export function getBm25SimilarityThreshold() {
+    return Number(get('bm25SimilarityThreshold', 0.3));
+}
+
+export function getMaxPartialGenerations() {
+    return Number(get('maxPartialGenerations', 3));
 }

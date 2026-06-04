@@ -1,14 +1,19 @@
-// core/engine/consolidate.js — STM→LTM consolidation engine
+// core/engine/consolidate.js — STM→LTM consolidation engine (cursor-based, universal)
 //
-// When unconsolidated STM reaches threshold, merges them into LTM summaries.
-// callLLM is injected as a dependency.
+// v2: consolidateWithCursor() uses the shared cursor engine for incremental,
+// partial-aware consolidation with BM25 pre-grouping.
+// v1: executeConsolidation() has been moved to core/engine/rp/rp-consolidate.js.
+//
+// Shared utilities: findNextId(), deriveTimeRange(), checkConsolidateThreshold()
+// are used by both the cursor path and the RP legacy path.
 
-import { read, write } from '../store.js';
-import { getStmMaxUnconsolidated } from '../config.js';
-import { validateLTMOutput, postFillLTM } from '../validator.js';
-import { buildConsolidatePrompt } from '../prompts.js';
+import { read, write, getCursorState, updateCursorState, migrateConsolidatedSTM } from '../store.js';
+import { getStmMaxUnconsolidated, getInitialLtmWindow, getLtmExpandStep, getMaxLtmWindow, getBm25SimilarityThreshold, getMaxPartialGenerations } from '../config.js';
+import { buildLtmCursorPrompt } from '../prompts.js';
+import { createCursorEngine } from './cursor.js';
+import { tokenize } from '../retrieval-filter.js';
 
-function findNextId(vault) {
+export function findNextId(vault) {
     var content = vault.content || {};
     var max = 0;
     (content.ltm_entries || []).forEach(function(e) {
@@ -18,64 +23,7 @@ function findNextId(vault) {
     return 'ltm_' + (max + 1);
 }
 
-export function checkConsolidateThreshold(vault) {
-    var content = vault.content || {};
-    var maxUnconsolidated = getStmMaxUnconsolidated();
-    var unconsolidated = (content.unconsolidated_stm || []).filter(function(stm) { return !stm.parent_ltm; });
-    if (unconsolidated.length < maxUnconsolidated) return false;
-    // Also check total text length to avoid consolidating too few short entries
-    var totalText = 0;
-    unconsolidated.forEach(function(s) {
-        totalText += (s.event || '').length + (s.scene || '').length;
-    });
-    if (totalText < maxUnconsolidated * 40) return false;
-    return true;
-}
-
-export function parseConsolidateResponse(llmResponse) {
-    try {
-        var text = String(llmResponse || '').trim();
-        var jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (jsonMatch) return JSON.parse(jsonMatch[0]);
-        return JSON.parse(text);
-    } catch (e) {
-        return { ltm_entries: [], delete_stm_ids: [] };
-    }
-}
-
-export function applyConsolidation(vault, consolidationResult) {
-    var content = vault.content || {};
-    content.stm_entries = content.stm_entries || [];
-    var allSTM = (content.unconsolidated_stm || []).concat(content.stm_entries || []);
-
-    var ltmEntries = consolidationResult.ltm_entries || [];
-    ltmEntries.forEach(function(ltm) {
-        if (!ltm.id) ltm.id = findNextId(vault);
-
-        var sourceSTM = allSTM.filter(function(s) {
-            return (ltm.stm_refs || []).indexOf(s.id) !== -1;
-        });
-        ltm.time_range = deriveTimeRange(sourceSTM);
-
-        content.ltm_entries.push(ltm);
-        (ltm.stm_refs || []).forEach(function(stmId) {
-            if (vault.stm_index && vault.stm_index[stmId]) {
-                vault.stm_index[stmId].ltm_id = ltm.id;
-            }
-            var found = allSTM.find(function(s) { return s.id === stmId; });
-            if (found) found.parent_ltm = ltm.id;
-        });
-    });
-    var unconsolidated = content.unconsolidated_stm || [];
-    var consolidated = unconsolidated.filter(function(s) { return s.parent_ltm; });
-    if (consolidated.length > 0) {
-        content.stm_entries = (content.stm_entries || []).concat(consolidated);
-        content.unconsolidated_stm = unconsolidated.filter(function(s) { return !s.parent_ltm; });
-    }
-    return ltmEntries.length;
-}
-
-function deriveTimeRange(sourceSTMEntries) {
+export function deriveTimeRange(sourceSTMEntries) {
     var timed = sourceSTMEntries.filter(function(s) {
         return (s.period || s.time_label);
     });
@@ -100,36 +48,220 @@ function deriveTimeRange(sourceSTMEntries) {
     return fmt(first) + ' → ' + fmt(last);
 }
 
-export async function executeConsolidation(chatId, callLLM) {
-    var vault = await read(chatId);
-    if (!checkConsolidateThreshold(vault)) return { vault: vault, merged: 0 };
+export function checkConsolidateThreshold(vault) {
     var content = vault.content || {};
+    var maxUnconsolidated = getStmMaxUnconsolidated();
     var unconsolidated = (content.unconsolidated_stm || []).filter(function(stm) { return !stm.parent_ltm; });
-    var prompt = buildConsolidatePrompt(vault);
-    var response = await callLLM([{ role: 'system', content: prompt.system }, { role: 'user', content: prompt.user }]);
-    var result = parseConsolidateResponse(response);
+    if (unconsolidated.length < maxUnconsolidated) return false;
+    // Also check total text length to avoid consolidating too few short entries
+    var totalText = 0;
+    unconsolidated.forEach(function(s) {
+        totalText += (s.event || '').length + (s.scene || '').length;
+    });
+    if (totalText < maxUnconsolidated * 40) return false;
+    return true;
+}
 
-    var validateErrors = validateLTMOutput(result);
-    if (validateErrors.length > 0) {
-        console.warn('[core/consolidate] LTM output validation failed, retrying:', validateErrors.join('; '));
-        var retryMsg = 'YOUR PREVIOUS OUTPUT WAS REJECTED. Every ltm_entries item MUST have "event", "period", "scene", and "stm_refs". Fix and re-output the JSON.';
-        var retryResponse = await callLLM([
-            { role: 'system', content: prompt.system },
-            { role: 'user', content: prompt.user },
-            { role: 'assistant', content: response },
-            { role: 'user', content: retryMsg }
-        ]);
-        result = parseConsolidateResponse(retryResponse);
+// ─── Cursor-based consolidation (v2) ───
+
+/**
+ * Parse LTM cursor response from LLM.
+ * Returns array of { summary, stmRange, status, concepts, parent_partial }.
+ */
+export function parseLtmCursorResponse(response, window) {
+    try {
+        var text = String(response || '').trim();
+        var codeMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (codeMatch) text = codeMatch[1].trim();
+
+        var arrayMatch = text.match(/\[[\s\S]*\]/);
+        if (arrayMatch) {
+            var parsed = JSON.parse(arrayMatch[0]);
+            if (Array.isArray(parsed)) {
+                return parsed.map(function(e) {
+                    if (!e.status) e.status = 'closed';  // default status
+                    if (e.stmRange && !e.stm_range) e.stm_range = e.stmRange;
+                    return e;
+                });
+            }
+        }
+
+        var jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            var obj = JSON.parse(jsonMatch[0]);
+            if (Array.isArray(obj)) return obj;
+            if (obj.ltm_entries) return obj.ltm_entries;
+        }
+
+        return [];
+    } catch (e) {
+        console.warn('[core/consolidate] Failed to parse cursor LTM response:', e.message);
+        return [];
+    }
+}
+
+/**
+ * Append LTM results from cursor engine to vault.
+ */
+export async function appendLtmResults(params) {
+    var vault = params._vault;
+    var closedResults = params.closedResults || [];
+    var cursorState = params.cursorState;
+    var chatId = params._chatId;
+
+    if (!vault && chatId) {
+        vault = await read(chatId);
+    }
+    if (!vault) return;
+
+    if (closedResults.length > 0) {
+        var content = vault.content || {};
+
+        // Assign IDs and metadata to LTM entries
+        closedResults.forEach(function(ltm) {
+            if (!ltm.id) ltm.id = findNextId(vault);
+
+            // Derive time_range from covered STM entries
+            var unconsolidated = content.unconsolidated_stm || [];
+            var stmRange = ltm.stm_range || ltm.stmRange || [];
+            var sourceSTM = [];
+            if (stmRange.length === 2) {
+                for (var i = stmRange[0]; i <= stmRange[1] && i < unconsolidated.length; i++) {
+                    sourceSTM.push(unconsolidated[i]);
+                }
+            }
+            if (!ltm.time_range) {
+                ltm.time_range = deriveTimeRange(sourceSTM);
+            }
+            if (!ltm.period) {
+                var period = deriveTimeRange(sourceSTM);
+                if (period) ltm.period = period;
+            }
+            if (!ltm.scene && sourceSTM.length > 0) {
+                ltm.scene = sourceSTM[0].scene || '';
+            }
+
+            // Ensure stm_refs
+            ltm.stm_refs = sourceSTM.map(function(s) { return s.id; }).filter(Boolean);
+
+            // Inherit entities from source STM for entity chain visibility
+            ltm.entities = sourceSTM.reduce(function(acc, s) {
+                (s.entities || []).forEach(function(e) {
+                    if (!acc.find(function(a) { return a.name === e.name && a.type === e.type; })) {
+                        acc.push({ name: e.name, type: e.type || 'entity' });
+                    }
+                });
+                return acc;
+            }, []);
+
+            // Add to LTM entries
+            content.ltm_entries = content.ltm_entries || [];
+            content.ltm_entries.push(ltm);
+        });
+
+        // Migrate consolidated STM
+        migrateConsolidatedSTM(vault, closedResults);
     }
 
-    postFillLTM(result, unconsolidated);
-    var merged = applyConsolidation(vault, result);
-    if (merged > 0) {
+    // Update cursor state
+    if (cursorState) {
+        updateCursorState(vault, 'ltm', cursorState);
+    }
+
+    if (chatId) {
         vault._meta = vault._meta || {};
-        vault._meta.last_pipeline_task = 'consolidation';
+        vault._meta.last_pipeline_task = 'ltm_consolidate_cursor';
         vault._meta.last_pipeline_time = new Date().toISOString();
         vault.version = (vault.version || 0) + 1;
         await write(chatId, vault);
     }
-    return { vault: vault, merged: merged };
+}
+
+/**
+ * Main cursor-based LTM consolidation entry point.
+ *
+ * @param {Object} [options]
+ * @param {string} options.chatId - Chat session ID
+ * @param {Function} options.callLLM - LLM call function
+ * @param {Object} [options.config] - Optional config overrides
+ * @returns {Promise<Object>} { results, cursor, vault }
+ */
+export async function consolidateWithCursor(options) {
+    var chatId = options?.chatId;
+    var callLLM = options?.callLLM;
+    var config = options?.config || {};
+
+    if (!chatId || !callLLM) {
+        throw new Error('consolidateWithCursor requires chatId and callLLM');
+    }
+
+    // Load vault and cursor state
+    var vault = await read(chatId);
+    var cursorState = getCursorState(vault, 'ltm');
+
+    // Get unconsolidated STM entries
+    var content = vault.content || {};
+    var allSTM = (content.unconsolidated_stm || []).filter(function(s) { return !s.parent_ltm; });
+
+    if (allSTM.length === 0) {
+        return { results: [], cursor: cursorState, vault: vault };
+    }
+
+    // Create cursor engine (LTM mode: allowSkip always false)
+    var engine = createCursorEngine({
+        mode: 'ltm',
+        initialWindow: config.initialLtmWindow || getInitialLtmWindow(),
+        expandStep: config.ltmExpandStep || getLtmExpandStep(),
+        maxWindow: config.maxLtmWindow || getMaxLtmWindow(),
+        allowSkip: false,  // LTM must cover all STM entries
+        tokenizer: tokenize,
+        callLLM: callLLM,
+        readVault: function() { return read(chatId); },
+        writeVault: function(v) { return write(chatId, v); },
+        similarityThreshold: config.bm25SimilarityThreshold || getBm25SimilarityThreshold(),
+        maxPartialGenerations: config.maxPartialGenerations || getMaxPartialGenerations()
+    });
+
+    // Run cursor engine
+    var result = await engine.process({
+        inputs: allSTM,
+        cursorState: cursorState,
+        promptBuilder: function(params) {
+            return buildLtmCursorPrompt({
+                items: params.items,
+                startIdx: params.startIdx,
+                preGroups: params.preGroups,
+                partials: params.partials,
+                force: params.force
+            });
+        },
+        resultParser: parseLtmCursorResponse,
+        resultAppender: async function(params) {
+            await appendLtmResults({
+                _chatId: chatId,
+                _vault: vault,
+                closedResults: params.closedResults,
+                cursorState: params.cursorState
+            });
+            // Reload vault after append
+            vault = await read(chatId);
+        }
+    });
+
+    // Save final cursor state
+    if (result.cursor) {
+        updateCursorState(vault, 'ltm', result.cursor);
+        vault._meta = vault._meta || {};
+        vault._meta.last_pipeline_task = 'ltm_consolidate_cursor';
+        vault._meta.last_pipeline_time = new Date().toISOString();
+        vault.version = (vault.version || 0) + 1;
+        await write(chatId, vault);
+    }
+
+    return {
+        results: result.results,
+        cursor: result.cursor,
+        vault: vault,
+        merged: result.results.length
+    };
 }

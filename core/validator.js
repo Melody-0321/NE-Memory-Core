@@ -1,24 +1,11 @@
-// core/validator.js — STM/LTM output validation and post-fill
+// core/validator.js — General STM/LTM output validation and post-fill
 //
-// No external dependencies. Pure validation logic.
+// No external dependencies. Pure validation logic for agent/general mode.
+// RP-specific validators have been moved to core/engine/rp/rp-validator.js.
 
-export function validateSTMOutput(parsed, vault) {
+export function validateSTMOutput(parsed, vault, options) {
     var errors = [];
-    var checkpoints = parsed._checkpoints;
     var stmEntries = parsed.stmEntries || [];
-
-    if (checkpoints !== undefined) {
-        if (!checkpoints || typeof checkpoints !== 'object') {
-            errors.push('_checkpoints block is REQUIRED when using new format');
-        } else {
-            if (!checkpoints.time || !String(checkpoints.time).trim()) {
-                errors.push('_checkpoints.time is REQUIRED (current story time, even if unchanged)');
-            }
-            if (!checkpoints.scene || !String(checkpoints.scene).trim()) {
-                errors.push('_checkpoints.scene is REQUIRED (current scene, even if unchanged)');
-            }
-        }
-    }
 
     for (var i = 0; i < stmEntries.length; i++) {
         var e = stmEntries[i];
@@ -31,13 +18,12 @@ export function validateSTMOutput(parsed, vault) {
 }
 
 export function postFillSTM(parsed, vault) {
-    var checkpoints = (parsed._checkpoints) || {};
     var content = vault && vault.content || {};
     var state = content.state || {};
     var stmEntries = parsed.stmEntries || [];
 
-    var defaultPeriod = mergeStoryPeriod(checkpoints.time || state.time || content.story_time, content.story_date);
-    var defaultScene = checkpoints.scene || state.scene || content.story_scene || '';
+    var defaultPeriod = state.time || content.story_time || new Date().toISOString().slice(0, 10);
+    var defaultScene = state.scene || content.story_scene || '';
 
     for (var i = 0; i < stmEntries.length; i++) {
         var e = stmEntries[i];
@@ -45,34 +31,14 @@ export function postFillSTM(parsed, vault) {
         e.scene = defaultScene;
     }
 
-    if (checkpoints.time && checkpoints.time !== 'same') {
-        content.story_time = String(checkpoints.time);
-        if (!state.time) { if (!content.state) content.state = {}; content.state.time = String(checkpoints.time); }
-    } else if (stmEntries.length > 0 && stmEntries[0].period) {
-        var inferredTime = String(stmEntries[0].period).split(' ─ ')[0];
-        content.story_time = inferredTime;
-    }
     if (!content.story_time) {
-        content.story_time = 'Day 1';
-    }
-    if (checkpoints.scene) {
-        content.story_scene = String(checkpoints.scene);
-        if (!state.scene) { if (!content.state) content.state = {}; content.state.scene = String(checkpoints.scene); }
-    } else if (stmEntries.length > 0 && stmEntries[0].scene) {
-        content.story_scene = String(stmEntries[0].scene);
+        content.story_time = new Date().toISOString().slice(0, 10);
     }
     if (!content.story_scene) {
-        content.story_scene = '未知';
+        content.story_scene = 'unknown';
     }
 
     return parsed;
-}
-
-export function mergeStoryPeriod(storyTime, storyDate) {
-    var parts = [];
-    if (storyTime) parts.push(storyTime);
-    if (storyDate) parts.push(storyDate);
-    return parts.join(' ─ ');
 }
 
 export function validateLTMOutput(result) {
@@ -151,14 +117,13 @@ export function postFillLTM(result, sourceSTMList) {
     return result;
 }
 
-var KNOWN_STATE_FIELDS = ['time', 'scene', 'story_date'];
+export function mergeStoryPeriod(storyTime, storyDate) {
+    var parts = [];
+    if (storyTime) parts.push(storyTime);
+    if (storyDate) parts.push(storyDate);
+    return parts.join(' ─ ');
+}
 
 export function whitelistStateChanges(changes) {
-    var filtered = {};
-    Object.keys(changes || {}).forEach(function(key) {
-        if (KNOWN_STATE_FIELDS.indexOf(key) !== -1) {
-            filtered[key] = changes[key];
-        }
-    });
-    return filtered;
+    return changes || {};
 }

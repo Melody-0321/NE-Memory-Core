@@ -9,3 +9,16 @@ data/
 .env
 .DS_Store
 Thumbs.db
+
+# IDE internal documents
+.trae/
+
+# Benchmark / experiment scripts (not core)
+benchmark/
+_test_*.cjs
+
+# Python cache
+__pycache__/
+
+# RP-specific engine code (separated from general core)
+core/engine/rp/

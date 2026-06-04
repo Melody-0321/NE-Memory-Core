@@ -1,5 +1,7 @@
 {
   "data_dir": "./data",
+  "project_root": "D:/你的项目根目录",
+  "_comment_project_root": "IDE 项目根目录的绝对路径。State 注入将以此为基准探测 .trae/rules/、.cursor/rules/、.windsurf/rules/ 等目录。建议用绝对路径（如 D:/SillyTavern），避免相对路径受 CWD 影响。此项等价于环境变量 NE_MEMORY_PROJECT_ROOT，环境变量优先。",
   "_comment_config": "stmBatch / stmMaxUnconsolidated 可在运行时通过 memory_update_config 动态调整，无需重启。stmBatch 默认 10，stmMaxUnconsolidated 默认 30。",
   "stmBatch": 10,
   "stmWordsThreshold": 500,
@@ -7,9 +9,23 @@
   "enableStateSchema": false,
   "retrievalEnabled": true,
   "memoryEnabled": true,
+  "_comment_workspace": "仅 trae-sqlite reader 需要。指向 Trae/Cursor 的 workspaceStorage 目录",
+  "workspace_dir": "/path/to/workspaceStorage",
+  "_comment_state_injection": "State → Rule 文件自动注入。设为 false 禁用。需配合环境变量 NE_MEMORY_PROJECT_ROOT。auto-detect 优先级: .trae/rules/ > .cursor/rules/ > .claude/rules/ > .github/copilot-instructions.md > .windsurf/rules/ > .windsurfrules > CLAUDE.md > 通用 fallback。path 可覆盖自动检测。",
+  "state_injection": {
+    "enabled": true,
+    "_comment_path": "可选。显式指定目标文件路径。不设则自动检测。"
+  },
+  "history": {
+    "_comment": "reader 可选: trae-sqlite | cursor-jsonl | claude-code-jsonl | copilot-json | openclaw-jsonl | openclaw-md | generic-json",
+    "reader": "trae-sqlite",
+    "path": "/path/to/state.vscdb"
+  },
   "secondary_api": {
     "url": "https://api.deepseek.com/v1/chat/completions",
     "key": "YOUR_DEEPSEEK_API_KEY",
     "model": "deepseek-v4-flash"
-  }
+  },
+
+  "_comment_openclaw_plugin": "OpenClaw 插件支持: extensions/openclaw-plugin/ 目录下。安装: openclaw plugins install @ne-memory/openclaw-plugin。配置见插件 README。"
 }

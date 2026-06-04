@@ -16,11 +16,14 @@
 //
 //   const result = await ne.extractSTM('my-chat', messages);
 
-import { initStore, read, write, rollbackByMsgIds } from './store.js';
-import { initConfig, get, set } from './config.js';
+import { initStore, read, write, rollbackByMsgIds, getCursorState, updateCursorState, markMessagesProcessed, isMessageProcessed, getProcessedMessageIds, filterUnprocessedMessages } from './store.js';
+import { initConfig, get, set, isCursorEngineEnabled, getExtractionMode, getInitialStmWindow, getStmExpandStep, getMaxStmWindow, getInitialLtmWindow, getLtmExpandStep, getMaxLtmWindow, getStmMinBatchForCursor, getLtmMinBatch, getBm25SimilarityThreshold, getMaxPartialGenerations } from './config.js';
 import { filterCandidates } from './retrieval-filter.js';
-import { executeIncrementalUpdate } from './engine/extract.js';
-import { executeConsolidation } from './engine/consolidate.js';
+import { extractWithCursor } from './engine/extract.js';
+import { consolidateWithCursor } from './engine/consolidate.js';
+// RP legacy fallback — only used when cursor engine is disabled
+import { executeIncrementalUpdate } from './engine/rp/rp-extract.js';
+import { executeConsolidation } from './engine/rp/rp-consolidate.js';
 import { validateStateChanges, mergeStateChanges } from './schema.js';
 import { t_narrative } from './i18n.js';
 import { accessEntry } from './access.js';
@@ -29,6 +32,10 @@ import { listReaders, createReader } from './adapters/history/index.js';
 import './adapters/history/trae-sqlite-reader.js';
 import './adapters/history/generic-json-reader.js';
 import './adapters/history/openclaw-md-reader.js';
+import './adapters/history/cursor-jsonl-reader.js';
+import './adapters/history/claude-code-jsonl-reader.js';
+import './adapters/history/copilot-json-reader.js';
+import './adapters/history/openclaw-jsonl-reader.js';
 
 export function initCore(deps) {
     // Initialize subsystems
@@ -116,13 +123,94 @@ export function initCore(deps) {
         // STM extraction
         extractSTM: function(chatId, messages, options) {
             if (!callLLM) return Promise.reject(new Error('No callLLM configured. Call ne.setLLM(fn) first.'));
+            if (isCursorEngineEnabled()) {
+                return extractWithCursor({
+                    chatId: chatId,
+                    messages: messages,
+                    callLLM: callLLM,
+                    config: options || {}
+                });
+            }
             return executeIncrementalUpdate(chatId, messages, callLLM, options || {});
         },
 
         // LTM consolidation
         consolidate: function(chatId) {
             if (!callLLM) return Promise.reject(new Error('No callLLM configured. Call ne.setLLM(fn) first.'));
+            if (isCursorEngineEnabled()) {
+                return consolidateWithCursor({
+                    chatId: chatId,
+                    callLLM: callLLM
+                });
+            }
             return executeConsolidation(chatId, callLLM);
+        },
+
+        // Cursor pipeline: STM extract + optional auto-consolidation
+        processMessages: async function(chatId, messages, options) {
+            if (!callLLM) return Promise.reject(new Error('No callLLM configured. Call ne.setLLM(fn) first.'));
+            options = options || {};
+
+            var result;
+            if (isCursorEngineEnabled()) {
+                result = await extractWithCursor({
+                    chatId: chatId,
+                    messages: messages,
+                    callLLM: callLLM,
+                    config: options
+                });
+            } else {
+                result = await executeIncrementalUpdate(chatId, messages, callLLM, options);
+            }
+
+            // Auto-consolidation check
+            var vault = result.vault || await read(chatId);
+            if (shouldConsolidateStm(vault, options)) {
+                var consResult;
+                if (isCursorEngineEnabled()) {
+                    consResult = await consolidateWithCursor({
+                        chatId: chatId,
+                        callLLM: callLLM
+                    });
+                } else {
+                    consResult = await executeConsolidation(chatId, callLLM);
+                }
+                return {
+                    stm: result,
+                    ltm: consResult,
+                    vault: consResult.vault || vault
+                };
+            }
+
+            return { stm: result, vault: vault };
+        },
+
+        // Cursor status
+        getCursorStatus: async function(chatId) {
+            var vault = await read(chatId);
+            var stmCursor = getCursorState(vault, 'stm');
+            var ltmCursor = getCursorState(vault, 'ltm');
+            return {
+                stm: {
+                    position: stmCursor.position || 0,
+                    pending_partials: (stmCursor.pending_partials || []).length
+                },
+                ltm: {
+                    position: ltmCursor.position || 0,
+                    pending_partials: (ltmCursor.pending_partials || []).length
+                }
+            };
+        },
+
+        // Reset cursor (debugging)
+        resetCursor: async function(chatId, cursorType) {
+            var vault = await read(chatId);
+            var types = cursorType ? [cursorType] : ['stm', 'ltm'];
+            types.forEach(function(t) {
+                updateCursorState(vault, t, { position: 0, pending_partials: [] });
+            });
+            await write(chatId, vault);
+            return { reset: types };
         },
 
         // State management
@@ -168,3 +256,34 @@ export {
 export { createFSBackend } from './adapters/storage-fs.js';
 export { createAPILLM } from './adapters/llm-api.js';
 export { createCallbackLLM } from './adapters/llm-callback.js';
+
+// Re-export processed message ID tracking utilities
+export {
+    markMessagesProcessed,
+    isMessageProcessed,
+    getProcessedMessageIds,
+    filterUnprocessedMessages
+};
+
+// ─── Cursor pipeline utilities ───
+
+/**
+ * Check if LTM consolidation should be triggered.
+ * Dual condition: unconsolidated count threshold OR pending partial convergence.
+ */
+export function shouldConsolidateStm(vault, config) {
+    config = config || {};
+    var unconsolidated = vault.content.unconsolidated_stm || [];
+    var ltmCursor = (vault.content.cursor_state || {}).ltm;
+
+    // Condition 1: unconsolidated count reaches threshold
+    var threshold = config.ltmMinBatch || getLtmMinBatch();
+    if (unconsolidated.length >= threshold) return true;
+
+    // Condition 2: pending LTM partials have related new STMs
+    if (ltmCursor && ltmCursor.pending_partials && ltmCursor.pending_partials.length > 0) {
+        return true;
+    }
+
+    return false;
+}

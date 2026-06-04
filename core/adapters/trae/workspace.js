@@ -35,9 +35,13 @@ export function listWorkspaces(workspaceDir, vaultDataDir) {
         var chatIds = [];
         if (vaultDataDir && fs.existsSync(vaultDataDir)) {
             try {
-                chatIds = fs.readdirSync(vaultDataDir)
-                    .filter(function(f) { return f.endsWith('.json'); })
-                    .map(function(f) { return f.replace('.json', ''); });
+                // Per-workspace namespace: data/{workspaceId}/*.json
+                var nsDir = path.join(vaultDataDir, entry.name);
+                if (fs.existsSync(nsDir)) {
+                    chatIds = fs.readdirSync(nsDir)
+                        .filter(function(f) { return f.endsWith('.json'); })
+                        .map(function(f) { return f.replace('.json', ''); });
+                }
             } catch (e) { /* ignore */ }
         }
 

@@ -13,10 +13,12 @@ import { read } from './store.js';
  * Supported formats:
  *   "stm_12" or "ltm_3" — memory entry with children chain
  *   "msg#95" or "95"   — original message text (host must supply getMessages)
- *   "characters.Name"  — character card detail
- *   "factions.Name"    — faction detail with relations
- *   "quests.Name"      — quest/task/goal/event detail
- *   "chain.Name"       — narrative chain for an entity
+ *   "participants.Name"  — participant detail
+ *   "teams.Name"         — team detail with relations
+ *   "medium_tasks.ID"    — medium-term task detail
+ *   "short_tasks.ID"     — short-term task detail
+ *   "emergencies.ID"     — emergency detail
+ *   "chain.Name"         — narrative chain for an entity
  */
 export async function accessEntry(chatId, ref, options) {
     options = options || {};
@@ -73,17 +75,29 @@ export async function accessEntry(chatId, ref, options) {
         return lookupChain(content, entityName);
     }
 
-    // characters.X / factions.X / quests.X → State detail
+    // time / time.X → time index view
+    if (ref === 'time' || ref.indexOf('time.') === 0) {
+        return lookupTimeline(content, ref);
+    }
+
+    // participants.X / teams.X / medium_tasks.X / short_tasks.X / emergencies.X → State detail
     var dotIdx = ref.indexOf('.');
     if (dotIdx > 0) {
         var domain = ref.substring(0, dotIdx);
         var name = ref.substring(dotIdx + 1);
-        if (domain === 'characters') return formatCharacterDetail(state, name);
-        if (domain === 'factions') return formatFactionDetail(state, name);
-        if (domain === 'quests') return formatQuestDetail(state, name);
+        if (domain === 'participants') return formatParticipantDetail(state, name);
+        if (domain === 'teams') return formatTeamDetail(state, name);
+        if (domain === 'medium_tasks') return formatMediumTaskDetail(state, name);
+        if (domain === 'short_tasks') return formatShortTaskDetail(state, name);
+        if (domain === 'emergencies') return formatEmergencyDetail(state, name);
+
+        // Backward compat aliases
+        if (domain === 'characters') return formatParticipantDetail(state, name);
+        if (domain === 'factions') return formatTeamDetail(state, name);
+        if (domain === 'quests') return formatQuestAlias(state, name);
     }
 
-    return 'Unknown ref format: ' + ref + '. Use stm_XX, ltm_XX, XX, characters.Name, factions.Name, quests.Name, or chain.Name.';
+    return 'Unknown ref format: ' + ref + '. Use stm_XX, ltm_XX, XX, participants.Name, teams.Name, medium_tasks.ID, short_tasks.ID, emergencies.ID, or chain.Name.';
 }
 
 // ─── Memory entry lookup ───
@@ -133,83 +147,99 @@ function lookupChain(content, entityName) {
     return chainLines.join('\n');
 }
 
+// ─── Timeline view ───
+
+function lookupTimeline(content, ref) {
+    var filter = ref.replace('time', '').replace(/^\./, '').trim();
+
+    var allSTM = (content.unconsolidated_stm || []).concat(content.stm_entries || []);
+    var allLTM = content.ltm_entries || [];
+    var allEntries = allSTM.concat(allLTM);
+
+    var timeEntries;
+    if (filter) {
+        var filterLower = filter.toLowerCase();
+        timeEntries = allEntries.filter(function(e) {
+            var timeStr = (e.period || e.time_range || '').toLowerCase();
+            return timeStr.indexOf(filterLower) !== -1;
+        });
+        if (timeEntries.length === 0) {
+            return 'No entries found for time: ' + filter + '. Available periods: ' +
+                allEntries.map(function(e) { return e.period || e.time_range; }).filter(Boolean).slice(0, 20).join(', ');
+        }
+    } else {
+        timeEntries = allEntries.slice();
+    }
+
+    timeEntries.sort(function(a, b) {
+        var ta = (a.period || a.time_range || '');
+        var tb = (b.period || b.time_range || '');
+        return ta.localeCompare(tb);
+    });
+
+    var label = filter ? ('Timeline: ' + filter) : 'Full Timeline';
+    var lines = ['=== ' + label + ' (' + timeEntries.length + ' entries) ==='];
+
+    timeEntries.forEach(function(e, i) {
+        var time = e.period || e.time_range || '?';
+        var timeLabel = e.time_label ? '·' + e.time_label : '';
+        var scene = e.scene || '';
+        var text = e.event || e.summary || '';
+        var entryType = e.stm_refs ? '[LTM]' : '[STM]';
+        lines.push((i + 1) + '. ' + entryType + ' [' + time + timeLabel + '] ' + (scene ? scene + ': ' : '') + text.substring(0, 120));
+    });
+
+    return lines.join('\n');
+}
+
 // ─── State entity formatters ───
 
-export function formatCharacterDetail(state, name) {
-    var characters = state.characters || {};
-    var card = characters[name];
+export function formatParticipantDetail(state, name) {
+    var participants = state.participants || {};
+    var card = participants[name];
     if (!card || typeof card !== 'object') {
-        return 'Character "' + name + '" not found. Available: ' + Object.keys(characters).join(', ');
+        return 'Participant "' + name + '" not found. Available: ' + Object.keys(participants).join(', ');
     }
 
     var lines = [];
     lines.push('=== ' + name + ' ===');
     lines.push('');
 
-    var npcNames = state.npc_names;
-    var isNPC = npcNames && Array.isArray(npcNames) && npcNames.indexOf(name) !== -1;
-
-    var coreFields = ['name', 'gender_age', 'occupation', 'clothing_build', 'personality', 'status'];
+    var coreFields = ['name', 'role', 'department', 'expertise', 'status'];
     coreFields.forEach(function(key) {
         if (card[key] !== undefined && card[key] !== null && card[key] !== '') {
             lines.push(key + ': ' + String(card[key]));
         }
     });
 
-    if (isNPC) {
-        if (card.inner_thoughts) lines.push('inner_thoughts: ' + String(card.inner_thoughts));
-        if (card.affection !== undefined && card.affection !== null) lines.push('affection: ' + card.affection + '/100');
-        if (card.relationship) lines.push('relationship: ' + String(card.relationship));
-        if (card.current_mood) lines.push('current_mood: ' + String(card.current_mood));
-        if (card.past_experience) lines.push('past_experience: ' + String(card.past_experience));
-    }
-
-    if (card.injuries) lines.push('injuries: ' + String(card.injuries));
-    if (card.status_effects) lines.push('status_effects: ' + String(card.status_effects));
-    if (card.clothing_mode !== undefined) lines.push('clothing_mode: ' + (card.clothing_mode ? 'detailed' : 'simple'));
-
-    var inv = card.inventory;
-    var invMode = card.inventory_mode || '关闭';
-    if (invMode !== '关闭' && inv && typeof inv === 'object') {
-        var invLines = [];
-        if (inv.gold !== undefined && inv.gold !== null) invLines.push('Gold: ' + inv.gold + 'G');
-        var items = inv.items || [];
-        if (items.length > 0) {
-            var itemDescs = items.map(function(item) {
-                var desc = (item.name || '?') + (item.qty && item.qty > 1 ? ' x' + item.qty : '');
-                if (item.equipped) desc += ' [Equipped]';
-                if (item.desc) desc += ' - ' + item.desc;
-                return desc;
-            });
-            invLines.push('Items: ' + itemDescs.join('; '));
-        }
-        if (invLines.length > 0) {
-            lines.push('inventory_mode: ' + invMode);
-            lines.push('inventory: ' + invLines.join(' | '));
-        }
-    }
+    if (card.current_task) lines.push('current_task: ' + String(card.current_task));
+    if (card.workload) lines.push('workload: ' + String(card.workload));
+    if (card.skills) lines.push('skills: ' + String(card.skills));
+    if (card.background) lines.push('background: ' + String(card.background));
+    if (card.responsibilities) lines.push('responsibilities: ' + String(card.responsibilities));
+    if (card.notes) lines.push('notes: ' + String(card.notes));
 
     return lines.join('\n');
 }
 
-export function formatFactionDetail(state, name) {
-    var factions = state.factions || {};
-    var faction = factions[name];
-    if (!faction || typeof faction !== 'object') {
-        return 'Faction "' + name + '" not found. Available: ' + Object.keys(factions).join(', ');
+export function formatTeamDetail(state, name) {
+    var teams = state.teams || {};
+    var team = teams[name];
+    if (!team || typeof team !== 'object') {
+        return 'Team "' + name + '" not found. Available: ' + Object.keys(teams).join(', ');
     }
 
     var lines = [];
     lines.push('=== ' + name + ' ===');
     lines.push('');
 
-    if (faction.name) lines.push('name: ' + String(faction.name));
-    if (faction.description) lines.push('description: ' + String(faction.description));
-    if (faction.leader) lines.push('leader: ' + String(faction.leader));
-    if (faction.attitude_toward_player) lines.push('attitude_toward_player: ' + String(faction.attitude_toward_player));
-    if (faction.notes) lines.push('notes: ' + String(faction.notes));
+    if (team.name) lines.push('name: ' + String(team.name));
+    if (team.description) lines.push('description: ' + String(team.description));
+    if (team.lead) lines.push('lead: ' + String(team.lead));
+    if (team.members) lines.push('members: ' + String(team.members));
+    if (team.notes) lines.push('notes: ' + String(team.notes));
 
-    var relations = faction.relations;
+    var relations = team.relations;
     if (relations && typeof relations === 'object') {
         var relKeys = Object.keys(relations);
         if (relKeys.length > 0) {
@@ -224,78 +254,131 @@ export function formatFactionDetail(state, name) {
     return lines.join('\n');
 }
 
-export function formatQuestDetail(state, name) {
-    var quests = state.quests;
-    if (!quests || typeof quests !== 'object') {
-        return 'No quests found in state.';
-    }
-
-    /** @type {any} */
-    var found = null;
-    var foundType = null;
-
-    if (quests.tasks && typeof quests.tasks === 'object') {
-        Object.keys(quests.tasks).forEach(function(key) {
-            var t = quests.tasks[key];
-            if (t && (t.name === name || key === name)) { found = t; foundType = 'task'; }
-        });
-    }
-    if (!found && quests.goals && typeof quests.goals === 'object') {
-        Object.keys(quests.goals).forEach(function(key) {
-            var g = quests.goals[key];
-            if (g && (g.name === name || key === name)) { found = g; foundType = 'goal'; }
-        });
-    }
-    if (!found && quests.events && typeof quests.events === 'object') {
-        Object.keys(quests.events).forEach(function(key) {
-            var e = quests.events[key];
-            if (e && (e.name === name || key === name)) { found = e; foundType = 'event'; }
-        });
-    }
-
-    if (!found) {
-        var allNames = [];
-        ['tasks', 'goals', 'events'].forEach(function(section) {
-            if (quests[section] && typeof quests[section] === 'object') {
-                Object.keys(quests[section]).forEach(function(k) {
-                    var item = quests[section][k];
-                    allNames.push(item && item.name ? item.name : k);
-                });
-            }
-        });
-        return 'Quest "' + name + '" not found. Available: ' + (allNames.length > 0 ? allNames.join(', ') : '(none)');
+export function formatMediumTaskDetail(state, name) {
+    var mediumTasks = state.medium_tasks || {};
+    var task = mediumTasks[name];
+    if (!task || typeof task !== 'object') {
+        return 'Medium task "' + name + '" not found. Available: ' + Object.keys(mediumTasks).join(', ');
     }
 
     var lines = [];
-    var typeLabels = { task: '=== Task ===', goal: '=== Goal ===', event: '=== World Event ===' };
-    lines.push(typeLabels[foundType] || '=== Quest ===');
+    lines.push('=== Medium Task: ' + (task.title || name) + ' ===');
     lines.push('');
+    if (task.title) lines.push('title: ' + String(task.title));
+    if (task.status) lines.push('status: ' + String(task.status));
+    if (task.description) lines.push('description: ' + String(task.description));
+    if (task.progress_summary) lines.push('progress_summary: ' + String(task.progress_summary));
+    if (task.assignee) lines.push('assignee: ' + String(task.assignee));
+    if (task.deadline) lines.push('deadline: ' + String(task.deadline));
+    if (task.created_at) lines.push('created_at: ' + String(task.created_at));
+    if (task.parent_mission) lines.push('parent_mission: ' + String(task.parent_mission));
 
-    if (foundType === 'task') {
-        if (found.name) lines.push('name: ' + String(found.name));
-        if (found.deadline) lines.push('deadline: ' + String(found.deadline));
-        if (found.status) lines.push('status: ' + String(found.status));
-        if (found.type) lines.push('type: ' + String(found.type));
-        if (found.issuer) lines.push('issuer: ' + String(found.issuer));
-        if (found.desc) lines.push('desc: ' + String(found.desc));
-        if (found.progress) lines.push('progress: ' + String(found.progress));
-        if (found.posted_time) lines.push('posted_time: ' + String(found.posted_time));
-        if (found.reward) lines.push('reward: ' + String(found.reward));
-        if (found.penalty) lines.push('penalty: ' + String(found.penalty));
-    } else if (foundType === 'goal') {
-        if (found.name) lines.push('name: ' + String(found.name));
-        if (found.status) lines.push('status: ' + String(found.status));
-        if (found.desc) lines.push('desc: ' + String(found.desc));
-        if (found.progress) lines.push('progress: ' + String(found.progress));
-        if (found.posted_time) lines.push('posted_time: ' + String(found.posted_time));
-        if (found.completed_time) lines.push('completed_time: ' + String(found.completed_time));
-    } else if (foundType === 'event') {
-        if (found.name) lines.push('name: ' + String(found.name));
-        if (found.status) lines.push('status: ' + String(found.status));
-        if (found.desc) lines.push('desc: ' + String(found.desc));
-        if (found.started_time) lines.push('started_time: ' + String(found.started_time));
-        if (found.ended_time) lines.push('ended_time: ' + String(found.ended_time));
+    // List child short tasks
+    var shortTasks = state.short_tasks || {};
+    var childTasks = Object.keys(shortTasks).filter(function(k) {
+        var s = shortTasks[k];
+        return s && s.parent_medium === name;
+    });
+    if (childTasks.length > 0) {
+        lines.push('');
+        lines.push('--- Child Short Tasks ---');
+        childTasks.forEach(function(k) {
+            var s = shortTasks[k];
+            lines.push(k + ': [' + (s.status || '?') + '] ' + (s.title || '') +
+                (s.assignee ? ' (assigned: ' + s.assignee + ')' : ''));
+        });
     }
 
     return lines.join('\n');
+}
+
+export function formatShortTaskDetail(state, name) {
+    var shortTasks = state.short_tasks || {};
+    var task = shortTasks[name];
+    if (!task || typeof task !== 'object') {
+        return 'Short task "' + name + '" not found. Available: ' + Object.keys(shortTasks).join(', ');
+    }
+
+    var lines = [];
+    lines.push('=== Short Task: ' + (task.title || name) + ' ===');
+    lines.push('');
+    if (task.title) lines.push('title: ' + String(task.title));
+    if (task.status) lines.push('status: ' + String(task.status));
+    if (task.parent_medium) lines.push('parent_medium: ' + String(task.parent_medium));
+    if (task.assignee) lines.push('assignee: ' + String(task.assignee));
+    if (task.description) lines.push('description: ' + String(task.description));
+    if (task.created_at) lines.push('created_at: ' + String(task.created_at));
+
+    return lines.join('\n');
+}
+
+export function formatEmergencyDetail(state, name) {
+    var emergencies = state.emergencies || {};
+    var emergency = emergencies[name];
+    if (!emergency || typeof emergency !== 'object') {
+        return 'Emergency "' + name + '" not found. Available: ' + Object.keys(emergencies).join(', ');
+    }
+
+    var lines = [];
+    lines.push('=== Emergency: ' + (emergency.title || name) + ' ===');
+    lines.push('');
+    if (emergency.title) lines.push('title: ' + String(emergency.title));
+    if (emergency.status) lines.push('status: ' + String(emergency.status));
+    if (emergency.severity) lines.push('severity: ' + String(emergency.severity));
+    if (emergency.interrupted) lines.push('interrupted: ' + String(emergency.interrupted));
+    if (emergency.description) lines.push('description: ' + String(emergency.description));
+    if (emergency.created_at) lines.push('created_at: ' + String(emergency.created_at));
+    if (emergency.resolved_at) lines.push('resolved_at: ' + String(emergency.resolved_at));
+
+    return lines.join('\n');
+}
+
+// ─── Backward compat (quests.X → search across task tree) ───
+
+function formatQuestAlias(state, name) {
+    var lines = [];
+
+    var medium = state.medium_tasks || {};
+    if (medium[name]) {
+        lines.push(formatMediumTaskDetail(state, name));
+    }
+
+    var short = state.short_tasks || {};
+    if (short[name]) {
+        if (lines.length > 0) lines.push('\n---');
+        lines.push(formatShortTaskDetail(state, name));
+    }
+
+    var emergencies = state.emergencies || {};
+    if (emergencies[name]) {
+        if (lines.length > 0) lines.push('\n---');
+        lines.push(formatEmergencyDetail(state, name));
+    }
+
+    if (lines.length === 0) {
+        var allNames = [];
+        [medium, short, emergencies].forEach(function(obj) {
+            Object.keys(obj).forEach(function(k) { allNames.push(k); });
+        });
+        return 'Quest/entry "' + name + '" not found. Available: ' + (allNames.length > 0 ? allNames.join(', ') : '(none)');
+    }
+
+    return lines.join('\n');
+}
+
+// ─── Backward compat exports ───
+
+/** @deprecated Use formatParticipantDetail */
+export function formatCharacterDetail(state, name) {
+    return formatParticipantDetail(state, name);
+}
+
+/** @deprecated Use formatTeamDetail */
+export function formatFactionDetail(state, name) {
+    return formatTeamDetail(state, name);
+}
+
+/** @deprecated Use formatQuestAlias */
+export function formatQuestDetail(state, name) {
+    return formatQuestAlias(state, name);
 }

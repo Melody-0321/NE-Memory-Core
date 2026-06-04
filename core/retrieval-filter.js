@@ -48,6 +48,8 @@ function tokenize(text) {
     return tokens;
 }
 
+export { tokenize };
+
 function buildSearchableText(entry) {
     var parts = [];
     if (entry.period) parts.push(entry.period);
@@ -55,6 +57,7 @@ function buildSearchableText(entry) {
     if (entry.time_label) parts.push(entry.time_label);
     if (entry.scene) parts.push(entry.scene);
     if (entry.event) parts.push(entry.event);
+    if (entry.translation) parts.push(entry.translation);
     return parts.join(' ');
 }
 
@@ -91,8 +94,138 @@ function bm25Score(queryTokens, docTokens, avgDocLen, totalDocs, docFreq) {
     return score;
 }
 
-export function filterCandidates(query, allSTM, allLTM, topK) {
+// ─── Time constraint parsing ───
+
+export function parseTimeConstraint(query) {
+    if (!query || typeof query !== 'string') return null;
+
+    var q = query.trim();
+
+    // 1. Day X-Y range (narrative time)
+    var dayRange = q.match(/Day\s*(\d+)\s*(?:[-–—]|to)\s*Day?\s*(\d+)/i);
+    if (dayRange) {
+        return { type: 'narrative_range', from: 'Day ' + dayRange[1], to: 'Day ' + dayRange[2], period: 'Day ' + dayRange[1] + '-' + dayRange[2] };
+    }
+
+    // 2. Day X (narrative time)
+    var daySingle = q.match(/Day\s*(\d+)/i);
+    if (daySingle) {
+        return { type: 'narrative', period: 'Day ' + daySingle[1] };
+    }
+
+    // 3. Month YYYY (English month names)
+    var months = ['january','february','march','april','may','june','july','august','september','october','november','december',
+                  'jan','feb','mar','apr','jun','jul','aug','sep','oct','nov','dec'];
+    for (var i = 0; i < months.length; i++) {
+        var m = months[i];
+        var re = new RegExp('\\b' + m + '\\b', 'i');
+        if (re.test(q)) {
+            var yearMatch = q.match(/\b(20\d{2})\b/);
+            var period = m.charAt(0).toUpperCase() + m.slice(1);
+            if (yearMatch) period += ' ' + yearMatch[1];
+            var monthNum = (i % 12) + 1;
+            return { type: 'absolute', period: period, month: monthNum, year: yearMatch ? parseInt(yearMatch[1]) : null };
+        }
+    }
+
+    // 4. ISO date YYYY-MM
+    var isoMatch = q.match(/\b(20\d{2})-(\d{2})\b/);
+    if (isoMatch) {
+        return { type: 'absolute', period: isoMatch[1] + '-' + isoMatch[2], month: parseInt(isoMatch[2]), year: parseInt(isoMatch[1]) };
+    }
+
+    // 5. Relative time
+    if (/\byesterday\b/i.test(q)) return { type: 'relative', period: 'yesterday' };
+    if (/\blast\s+week\b/i.test(q)) return { type: 'relative', period: 'last week' };
+
+    return null;
+}
+
+export function applyTimeFilter(entries, constraint, content) {
+    if (!constraint) return entries.slice();
+
+    entries = entries || [];
+    content = content || {};
+
+    return entries.filter(function(e) {
+        var entryTime = e.period || e.time_range || '';
+        if (!entryTime) return false;
+
+        var entryLower = entryTime.toLowerCase();
+
+        if (constraint.type === 'narrative' || constraint.type === 'narrative_range') {
+            if (constraint.type === 'narrative') {
+                var targetDay = constraint.period.toLowerCase();
+                return entryLower.indexOf(targetDay) === 0;
+            } else {
+                var dayMatch = entryLower.match(/day\s*(\d+)/);
+                if (!dayMatch) return false;
+                var dayNum = parseInt(dayMatch[1]);
+                var fromDay = parseInt(constraint.from.toLowerCase().replace('day ', ''));
+                var toDay = parseInt(constraint.to.toLowerCase().replace('day ', ''));
+                return dayNum >= fromDay && dayNum <= toDay;
+            }
+        }
+
+        if (constraint.type === 'absolute') {
+            var period = constraint.period.toLowerCase();
+            return entryLower.indexOf(period) !== -1;
+        }
+
+        if (constraint.type === 'relative') {
+            return entryLower.indexOf(constraint.period.toLowerCase()) !== -1;
+        }
+
+        return true;
+    });
+}
+
+// ─── TimeOnly auto-detection ───
+
+var TIME_WORDS = [
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+    'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun',
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+    'day', 'week', 'month', 'year', 'hour', 'minute',
+    'morning', 'afternoon', 'evening', 'night', 'dawn', 'dusk', 'midnight',
+    'yesterday', 'today', 'tomorrow', 'tonight',
+    // Chinese
+    '昨天', '今天', '明天', '上午', '下午', '晚上', '早晨', '凌晨',
+    '周一', '周二', '周三', '周四', '周五', '周六', '周日',
+    '一月', '二月', '三月', '四月', '五月', '六月',
+    '七月', '八月', '九月', '十月', '十一月', '十二月',
+    '天', '周', '月', '年', '小时', '分钟',
+    '星期', '礼拜'
+];
+
+function isTimeWord(word) {
+    if (!word || word.length < 2) return false;
+    var lower = word.toLowerCase();
+    for (var i = 0; i < TIME_WORDS.length; i++) {
+        if (lower === TIME_WORDS[i] || lower.indexOf(TIME_WORDS[i]) !== -1) return true;
+    }
+    return false;
+}
+
+export function isTimeOnlyQuery(query, timeConstraint) {
+    if (!timeConstraint || !query) return false;
+
+    var lower = query.toLowerCase().trim();
+    // Strong signal: query starts with summarize/list/show everything/what happened
+    if (/^(summarize|总结|概括|列出|list|show.+everything|what happened)/i.test(lower)) return true;
+
+    var words = query.split(/[\s,，。！？!?\n]+/).filter(Boolean);
+    var nonTimeWords = words.filter(function(w) { return !isTimeWord(w); });
+
+    // <= 2 non-time words → pure time query, auto timeOnly
+    return nonTimeWords.length <= 2;
+}
+
+export function filterCandidates(query, allSTM, allLTM, topK, minResults) {
     topK = topK || 40;
+    minResults = minResults || 3;
     allSTM = allSTM || [];
     allLTM = allLTM || [];
 
@@ -157,8 +290,14 @@ export function filterCandidates(query, allSTM, allLTM, topK) {
 
     var resultCount = Math.min(topK, entries.length);
     var results = [];
+    var scoreZeroStart = -1;
     for (var i = 0; i < resultCount; i++) {
         var e = entries[i];
+        if (e._score <= 0) {
+            if (scoreZeroStart < 0) scoreZeroStart = i;
+            if (results.length >= minResults) break;  // Enough positive results, stop
+            // Fall through: include score-0 to reach minResults
+        }
         var result = JSON.parse(JSON.stringify(e._entry));
         result.__type = e._type;
         result.__id = e._id;
