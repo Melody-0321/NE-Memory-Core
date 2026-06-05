@@ -318,7 +318,8 @@ export function buildStmCursorPrompt(params) {
             : '消息必须连续覆盖，不能跳过任何消息。每条消息都必须归属于某条 STM。\n') +
         '4. 一次可以提取多条事件（0-10条）。如果没有可提取的事件，返回 []\n' +
         '5. "topic" 字段标注话题类别（如：设计/架构/bug/功能/配置/讨论）\n' +
-        '6. "event" 字段使用简洁描述（最长100字）' +
+        '6. "event" 字段使用简洁描述（最长100字）\n' +
+        '7. "entity": "实体名" — 可选。标注该事件涉及的核心实体（角色/组织等）。多条实体用逗号分隔' +
         (force ? '\n\n⚠️ 已到达窗口硬上限，请务必返回至少一条 closed 或 partial 结果。不允许返回空数组。' : '') +
         partialCtx +
         (preGroups ? '\n' + preGroups : '');
@@ -326,7 +327,7 @@ export function buildStmCursorPrompt(params) {
     return {
         messages: [
             { role: 'system', content: system },
-            { role: 'user', content: '最新消息：\n\n' + msgs + '\n\n仅输出一个 JSON 数组：\n[\n  { "event": "...", "msgRange": [0, 2], "status": "closed"|"partial", "topic": "话题", "parent_partial": null },\n  ...\n]' }
+            { role: 'user', content: '最新消息：\n\n' + msgs + '\n\n仅输出一个 JSON 数组：\n[\n  { "event": "...", "msgRange": [0, 2], "status": "closed"|"partial", "topic": "话题", "entity": "实体名", "parent_partial": null },\n  ...\n]' }
         ],
         options: { temperature: 0.1 }
     };

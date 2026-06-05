@@ -33,8 +33,13 @@ export function parseStmCursorResponse(response, window) {
                 return parsed.map(function(e) {
                     if (!e.status) e.status = 'closed';  // default status
                     if (e.msgRange && !e.msg_range) e.msg_range = e.msgRange;
+                    // Normalize entity → entities: single string or comma-separated
                     if (e.entity && !e.entities) {
-                        e.entities = [{ name: String(e.entity).trim(), type: 'character' }];
+                        var raw = String(e.entity).trim();
+                        var names = raw.split(/[,，、\s]+/).filter(Boolean);
+                        e.entities = names.map(function(n) {
+                            return { name: n, type: 'character' };
+                        });
                         delete e.entity;
                     }
                     return e;

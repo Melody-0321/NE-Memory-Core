@@ -230,7 +230,7 @@ export function createCursorEngine(options) {
         var ranges = [];
 
         for (var i = 0; i < parsed.length; i++) {
-            var r = parsed[i];
+            let r = parsed[i];
             var rangeKey = mode === 'stm' ? 'msgRange' : 'stmRange';
             var range = r[rangeKey];
 
